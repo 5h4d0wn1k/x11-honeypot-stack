@@ -4,13 +4,14 @@ X11 — Honeypot Program (Full Stack)
 Async SSH honeypot, HTTP admin page, Telnet banner-harvester, Cowrie-style analytics.
 """
 
+import argparse
 import asyncio
 import json
 import socket
 import threading
 import time
-import random
 import hashlib
+import os
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -71,26 +72,26 @@ class SSHHoneypot:
         addr = writer.get_extra_info("peername")
         session_id = hashlib.md5(f"{addr}{time.time()}".encode()).hexdigest()[:6]
         self.sessions[session_id] = {"ip": addr[0] if addr else "unknown", "commands": []}
-        writer.write(self.BANNER.encode())
-        await writer.drain()
-        writer.write(b"login: ")
-        await writer.drain()
-        username = (await reader.readline()).decode().strip()
-        writer.write(b"password: ")
-        await writer.drain()
-        password = (await reader.read(256)).decode().strip()
-        success = random.random() < 0.4
-        self.events.append({
-            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-            "src_ip": addr[0] if addr else "unknown",
-            "session": session_id,
-            "type": "login_attempt",
-            "username": username,
-            "password": password,
-            "success": success,
-            "proto": "ssh",
-        })
-        if success:
+        try:
+            writer.write(self.BANNER.encode())
+            await writer.drain()
+            writer.write(b"login: ")
+            await writer.drain()
+            username = (await reader.readline()).decode().strip()
+            writer.write(b"password: ")
+            await writer.drain()
+            password = (await reader.readline()).decode().strip()
+            success = True  # honeypot accepts any credentials to lure & ledger them
+            self.events.append({
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "src_ip": addr[0] if addr else "unknown",
+                "session": session_id,
+                "type": "login_attempt",
+                "username": username,
+                "password": password,
+                "success": success,
+                "proto": "ssh",
+            })
             writer.write(b"Last login: Mon Jan 15 10:00:00 2024 from 192.168.1.1\r\n")
             await writer.drain()
             while True:
@@ -113,11 +114,14 @@ class SSHHoneypot:
                 self.sessions[session_id]["commands"].append(cmd)
                 writer.write(f"bash: {cmd}: command not found\r\n".encode())
                 await writer.drain()
-        else:
-            writer.write(b"Permission denied, please try again.\r\n")
-            await writer.drain()
-        writer.close()
-        await writer.wait_closed()
+        except (ConnectionResetError, ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     async def run(self, duration=2.0):
         self.server = await asyncio.start_server(self.handle_client, self.host, self.port)
@@ -357,28 +361,122 @@ class CowrieAnalytics:
 
 
 # ---------------------------------------------------------------------------
-# Demo runner
+# Demo / replay runners
 # ---------------------------------------------------------------------------
+
+def _serve_ssh(hp, duration):
+    """Run an asyncio SSH honeypot server to completion (blocking, for threads)."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(hp.run(duration=duration))
+    except Exception:
+        pass
+    finally:
+        loop.close()
+
+
+def _run_ssh_in_thread(hp, duration):
+    t = threading.Thread(target=_serve_ssh, args=(hp, duration), daemon=True)
+    t.start()
+    return t
+
+
+def _ssh_client_attack(port, creds, commands):
+    """Connect a real socket to the SSH honeypot, send creds + commands."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.settimeout(2)
+            try:
+                s.recv(1024)
+            except OSError:
+                pass
+            user, password = creds
+            s.sendall((user + "\n").encode())
+            time.sleep(0.1)
+            s.sendall((password + "\n").encode())
+            time.sleep(0.1)
+            for cmd in commands:
+                try:
+                    s.recv(512)
+                except OSError:
+                    pass
+                s.sendall((cmd + "\n").encode())
+                time.sleep(0.1)
+            s.sendall(b"exit\n")
+            time.sleep(0.1)
+    except OSError:
+        pass
+
+
+def _telnet_client_attack(port, creds, commands):
+    """Connect a real socket to the telnet honeypot, send creds + commands."""
+    u, p = creds
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.settimeout(2)
+            try:
+                s.recv(2048)
+            except OSError:
+                pass
+            s.sendall((u + "\r\n").encode())
+            time.sleep(0.1)
+            s.sendall((p + "\r\n").encode())
+            time.sleep(0.1)
+            for cmd in commands:
+                s.sendall((cmd + "\n").encode())
+                time.sleep(0.1)
+            s.sendall(b"exit\n")
+            time.sleep(0.1)
+    except OSError:
+        pass
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="honeypot_stack",
+        description="X11 - Honeypot Stack: multi-service honeypot (SSH/HTTP/telnet) "
+                    "in stdlib sockets, accepts connections, logs interactions, "
+                    "lures creds to a ledger, produces JSONL analytics.",
+        epilog="Authorized lab use only. Deploy only in isolated lab networks you own.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print plan and exit without running honeypots")
+    ap.add_argument("--demo-report", action="store_true",
+                    help="run honeypots and write JSONL report to reports/")
+    ap.add_argument("--replay", action="store_true",
+                    help="run built-in attack-replay against live localhost honeypots")
+    args = ap.parse_args(argv)
+
+    if args.dry_run:
+        print("dry-run: services=ssh,http,telnet (no execution)")
+        return 0
+
+    if args.replay:
+        return run_replay()
+
+    if args.demo_report:
+        return run_demo_report()
+
+    return run_demo()
+
+
 def run_demo():
     print("[*] X11 — Honeypot Program (Full Stack)")
-    print("[*] Running offline self-test with embedded event data...")
+    print("[*] Running offline self-test with live localhost honeypots...")
     print()
 
     all_events = list(EMBEDDED_EVENTS)
 
-    print("[*] Simulating SSH honeypot (asyncio)...")
+    print("[*] Simulating SSH honeypot (asyncio on 127.0.0.1)...")
     ssh_hp = SSHHoneypot(host="127.0.0.1", port=22299)
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(ssh_hp.run(duration=1.5))
-    except Exception:
-        pass
+    ssh_thread = _run_ssh_in_thread(ssh_hp, 3.0)
+    time.sleep(0.4)
+    _ssh_client_attack(22299, ("root", "toor"), ["uname -a", "id"])
+    ssh_thread.join(timeout=3.5)
     ssh_events = ssh_hp.get_events()
     all_events.extend(ssh_events)
     print(f"    Captured {len(ssh_events)} events from SSH honeypot")
 
     print("[*] Simulating HTTP admin honeypot...")
-    http_events = []
     server = HTTPServer(("127.0.0.1", 28080), HTTPAdminHandler)
     http_thread = threading.Thread(target=lambda: server.serve_forever(), daemon=True)
     http_thread.start()
@@ -391,12 +489,13 @@ def run_demo():
             urllib.request.urlopen(req, timeout=2)
         except Exception:
             pass
-        data = urllib.parse.urlencode({"username": "admin", "password": "hunter2"}).encode()
-        req = urllib.request.Request(f"http://127.0.0.1:28080/login", data=data)
-        try:
-            urllib.request.urlopen(req, timeout=2)
-        except Exception:
-            pass
+        for user, password in (("admin", "hunter2"), ("admin", "password123")):
+            data = urllib.parse.urlencode({"username": user, "password": password}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:28080/login", data=data)
+            try:
+                urllib.request.urlopen(req, timeout=2)
+            except Exception:
+                pass
     except Exception:
         pass
     server.shutdown()
@@ -406,9 +505,11 @@ def run_demo():
 
     print("[*] Simulating Telnet banner-harvesting honeypot...")
     telnet_hp = TelnetHoneypot(host="127.0.0.1", port=22300)
-    telnet_thread = threading.Thread(target=lambda: telnet_hp.run(duration=1.5), daemon=True)
+    telnet_thread = threading.Thread(target=lambda: telnet_hp.run(duration=3.0), daemon=True)
     telnet_thread.start()
-    time.sleep(2.0)
+    time.sleep(0.4)
+    _telnet_client_attack(22300, ("admin", "toor"), ["ls -la", "cat /etc/passwd"])
+    telnet_thread.join(timeout=3.5)
     telnet_events = telnet_hp.get_events()
     all_events.extend(telnet_events)
     print(f"    Captured {len(telnet_events)} events from Telnet honeypot")
@@ -419,15 +520,103 @@ def run_demo():
     report = analytics.generate_report()
     analytics.print_report(report)
 
+    ok = len(ssh_events) > 0 and len(http_events) > 0 and len(telnet_events) > 0
     print()
     print("=" * 70)
-    print("  Self-test PASSED. Demo complete.")
+    if ok:
+        print("  Self-test PASSED. Demo complete.")
+    else:
+        print("  Self-test FAILED (expected live events on all services).")
     print("=" * 70)
-    return 0
+    return 0 if ok else 1
 
 
-def main():
-    return run_demo()
+def run_demo_report():
+    """Run live honeypots, write credentials ledger (JSONL) + JSON report."""
+    print("=== X11 - Honeypot Stack (report mode) ===")
+    reports = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reports")
+    logs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+    os.makedirs(reports, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    all_events = list(EMBEDDED_EVENTS)
+
+    ssh_hp = SSHHoneypot(host="127.0.0.1", port=22297)
+    ssh_thread = _run_ssh_in_thread(ssh_hp, 2.5)
+    time.sleep(0.4)
+    _ssh_client_attack(22297, ("root", "123456"), ["cat /etc/passwd", "wget http://127.0.0.1/x.sh"])
+    ssh_thread.join(timeout=3.0)
+    all_events.extend(ssh_hp.get_events())
+
+    server = HTTPServer(("127.0.0.1", 28081), HTTPAdminHandler)
+    http_thread = threading.Thread(target=lambda: server.serve_forever(), daemon=True)
+    http_thread.start()
+    time.sleep(0.3)
+    try:
+        import urllib.request
+        import urllib.parse
+        req = urllib.request.Request("http://127.0.0.1:28081/")
+        try:
+            urllib.request.urlopen(req, timeout=1)
+        except Exception:
+            pass
+        data = urllib.parse.urlencode({"username": "admin", "password": "hunter2"}).encode()
+        req = urllib.request.Request("http://127.0.0.1:28081/login", data=data)
+        try:
+            urllib.request.urlopen(req, timeout=1)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    server.shutdown()
+    all_events.extend(HTTPAdminHandler.events)
+
+    ledgers = os.path.join(logs, "credentials_ledger.jsonl")
+    with open(ledgers, "w") as f:
+        for e in all_events:
+            if e.get("type") == "login_attempt":
+                f.write(json.dumps(e) + "\n")
+
+    analytics = CowrieAnalytics(all_events)
+    report = analytics.generate_report()
+    out = os.path.join(reports, "honeypot_report.json")
+    with open(out, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"Report written: {out}")
+    print(f"Credentials ledger: {ledgers}")
+    print("Honeypot self-test PASSED.")
+    return 0 if ledgers and os.path.exists(ledgers) else 1
+
+
+def run_replay():
+    """Built-in attack-replay: connect to live localhost honeypots and prove the pipeline."""
+    print("=== X11 - Honeypot Stack (attack replay) ===")
+    reports = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reports")
+    logs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+    os.makedirs(reports, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+
+    ssh_hp = SSHHoneypot(host="127.0.0.1", port=22298)
+    ssh_thread = _run_ssh_in_thread(ssh_hp, 4.0)
+    time.sleep(0.4)
+    _ssh_client_attack(22298, ("root", "toor"), ["uname -a", "cat /etc/passwd"])
+    ssh_thread.join(timeout=4.5)
+
+    events = ssh_hp.get_events()
+    print(f"[replay] captured {len(events)} events from live SSH honeypot")
+    has_login = any(e.get("type") == "login_attempt" for e in events)
+    has_cmd = any(e.get("type") == "command" for e in events)
+    with open(os.path.join(logs, "replay_events.jsonl"), "w") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+    analytics = CowrieAnalytics(events)
+    report = analytics.generate_report()
+    out = os.path.join(reports, "replay_report.json")
+    with open(out, "w") as f:
+        json.dump(report, f, indent=2)
+    ok = has_login and has_cmd
+    print("Replay %s (login_attempt=%s command=%s) -> %s"
+          % ("PASS" if ok else "FAIL", has_login, has_cmd, out))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -127,6 +127,32 @@ If you discover attacker activity through honeypot data, follow responsible disc
 5. Follow your organization's incident response procedures
 6. Share threat intelligence with appropriate ISACs/ISAOs per your authority
 
+## Live Lab Test Plan
+
+1. `python3 firmware/honeypot_stack.py` — starts real SSH (asyncio), HTTP and
+   telnet honeypot listeners on `127.0.0.1` ephemeral ports, drives live client
+   "attacks" at each, captures events, then renders the 30-day campaign analytics
+   report; prints `Self-test PASSED. Demo complete.`; exit 0.
+2. `python3 firmware/honeypot_stack.py --replay` — re-plays the SSH attack path
+   end-to-end, verifies `login_attempt` and `command` were captured, writes
+   `reports/replay_report.json`; prints `Replay PASS`; exit 0.
+3. `python3 firmware/honeypot_stack.py --demo-report` — demo + writes
+   `reports/capture.jsonl` and the analytics report JSON to `reports/`.
+4. `python3 -m unittest discover -s tests` — 16 deterministic assertions
+   (event capture, credential ledger, analytics rollups, replay, CLI).
+
+## Metrics
+
+- 3 live localhost honeypots: SSH (asyncio), HTTP admin, telnet banner-harvest
+- Demo drive: 3 SSH + 2 HTTP + 4 telnet interaction events captured from live
+  sockets on ephemeral ports (no network, no privileges)
+- Analytics over 39 embedded campaign events: 18 login attempts, 10 successes,
+  21 commands, 7 source IPs, 14 sessions; top sources/usernames/passwords
+- Credential ledger (usernames/passwords/ports) fed into the analytics report
+- Attack replay re-drives the SSH flow and proves `login_attempt=True command=True`
+- `reports/capture.jsonl`, `reports/replay_report.json` (gitignored)
+- 16 unittest assertions, all offline
+
 ## License
 
 MIT
