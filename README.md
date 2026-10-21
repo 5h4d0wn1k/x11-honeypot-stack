@@ -142,7 +142,8 @@ If you discover attacker activity through honeypot data, follow responsible disc
    end-to-end, verifies `login_attempt` and `command` were captured, writes
    `reports/replay_report.json`; prints `Replay PASS`; exit 0.
 3. `python3 firmware/honeypot_stack.py --demo-report` — demo + writes
-   `reports/capture.jsonl` and the analytics report JSON to `reports/`.
+   `logs/credentials_ledger.jsonl` and the analytics report to
+   `reports/honeypot_report.json`.
 4. `python3 -m unittest discover -s tests` — 16 deterministic assertions
    (event capture, credential ledger, analytics rollups, replay, CLI).
 
@@ -155,7 +156,8 @@ If you discover attacker activity through honeypot data, follow responsible disc
   21 commands, 7 source IPs, 14 sessions; top sources/usernames/passwords
 - Credential ledger (usernames/passwords/ports) fed into the analytics report
 - Attack replay re-drives the SSH flow and proves `login_attempt=True command=True`
-- `reports/capture.jsonl`, `reports/replay_report.json` (gitignored)
+- `logs/credentials_ledger.jsonl`, `reports/honeypot_report.json`,
+  `reports/replay_report.json` (gitignored)
 - 16 unittest assertions, all offline
 
 ## License
