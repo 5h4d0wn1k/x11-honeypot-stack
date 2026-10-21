@@ -169,3 +169,31 @@ class TestPyCompile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHTTPNonUtf8Body(unittest.TestCase):
+    """A non-UTF8 POST body must not lose the whole attempt (#21)."""
+
+    def test_post_with_non_utf8_body_is_ledgered(self):
+        from http.server import HTTPServer
+        from honeypot_stack import HTTPAdminHandler
+
+        events_before = len(HTTPAdminHandler.events)
+        server = HTTPServer(("127.0.0.1", 0), HTTPAdminHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        body = b"username=admin&password=\xff\xfe"
+        req = (b"POST /login HTTP/1.1\r\nHost: x\r\nContent-Length: "
+               + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+        with socket.create_connection(("127.0.0.1", server.server_port), timeout=3) as s:
+            s.sendall(req)
+            resp = s.recv(1024)
+
+        self.assertGreaterEqual(len(resp), 1, "handler dropped the connection")
+        self.assertIn(b"302", resp.split(b"\r\n")[0])
+        self.assertEqual(len(HTTPAdminHandler.events), events_before + 1)
+        event = HTTPAdminHandler.events[-1]
+        self.assertEqual(event["username"], "admin")
+        self.assertIn("password", event)

@@ -164,7 +164,7 @@ class HTTPAdminHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode()
+        body = self.rfile.read(length).decode(errors="replace")
         params = dict(part.split("=") for part in body.split("&") if "=" in part)
         self.events.append({
             "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
